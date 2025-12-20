@@ -10,7 +10,7 @@ green_threshold   = (   50,   100,  -128,   -30,   -128,   127)
 #设置绿色的阈值，括号里面的数值分别是L A B 的最大值和最小值（minL, maxL, minA,
 # maxA, minB, maxB），LAB的值在图像左侧三个坐标图中选取。如果是灰度图，则只需
 #设置（min, max）两个数字即可。
-f=open("/sd/fps.txt","w")
+f=open("/sd/data/fps.txt","w")
 sensor.reset() # 初始化摄像头
 sensor.set_pixformat(sensor.RGB565) # 格式为 RGB565.
 sensor.set_framesize(sensor.QQVGA) # 使用 QQVGA 速度快一些
@@ -42,6 +42,10 @@ while(frame_count<=5000):
     clock.tick() # Track elapsed milliseconds between snapshots().
     img = sensor.snapshot() # 从感光芯片获得一张图像
     frame_count+=1
+    if uart.any():
+        break
+   
+
 
 
 
@@ -81,11 +85,11 @@ while(frame_count<=5000):
             #获取图像
     if frame_count%100==0 and save_count<1000:
     #图片存储限制
-        save_path = f"/sd/frame_{save_count}.jpg" # SD卡路径+jpg格式+唯一命名
+        save_path = f"/sd/data/picture/frame_{save_count}.jpg" # SD卡路径+jpg格式+唯一命名
         img.save(save_path, quality=90)  # quality可选，默认90
         save_count += 1  # 保存计数器+1，避免覆盖
     uart_send(a,x_ral,y_ral)
     #如果断开电脑，帧率会增加
     f.write(str(clock.fps())+"\n")
 f.close()
-
+os.umount('/sd')
