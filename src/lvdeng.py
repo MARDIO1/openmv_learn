@@ -15,14 +15,18 @@ x_ral=0.0
 y_ral=0.0
 state=0
 num=0
-FRAME_HEAD = 0xEE
-FRAME_TAIL = 0xFF
-FRAME_LEN  = 15
+#通信协议定义
+RX_HEAD=0xCC#接收
+RX_END=0xDD
+RX_LEN=16
+TX_HEAD=0xEE#发送
+TX_END=0xFF
 rx_buf = bytearray()
 condition = 0
 roi = None              # 当前ROI
 lost_count = 0          # 丢失计数
 MAX_LOST = 4            # 丢失多少帧后恢复全图搜索
+
 def find_green_light(img):#找绿色光源
     global roi
     if roi:
@@ -34,22 +38,21 @@ def find_green_light(img):#找绿色光源
 def uart_send(a,x,y):#uart 发送
     global uart;
     date=ustruct.pack("<BBffB",
-                 0xEE,
+                 TX_HEAD,
                  int(a),
                  float(x),
                  float(y),
-                 0xFF)
+                 TX_END)
     uart.write(date)
 
-
-def uart_read():
+def uart_read():#uart 接收
     global uart,rx_buf,condition;
     while uart.any():
             byte = uart.readchar()
 
             # 等待帧头
             if condition == 0:
-                if byte == FRAME_HEAD:
+                if byte == RX_HEAD:
                     rx_buf = bytearray([byte])
                     condition = 1
 
@@ -57,10 +60,10 @@ def uart_read():
             elif condition == 1:
                 rx_buf.append(byte)
 
-                if len(rx_buf) == FRAME_LEN:
+                if len(rx_buf) == RX_LEN:
                     condition = 0
 
-                    if rx_buf[-1] == FRAME_TAIL:
+                    if rx_buf[-1] == RX_END:
                         return rx_buf  # 成功接收一帧
                     else:
                         rx_buf = bytearray()  # 帧错误，丢弃
@@ -71,32 +74,36 @@ while f"fps_{log_id}.txt" in os.listdir("/sd/data"):
     log_id += 1
 
 f = open(f"/sd/data/fps_{log_id}.txt", "w")
+
 while(True):
     receive=uart_read()
     if receive is None:
         continue
-    if len(receive)!=FRAME_LEN:
+    if len(receive)!=RX_LEN:
         continue
-    fmt='15B'
+    fmt='16B'
     try:
         parsed=struct.unpack(fmt,receive)
     except struct.error:
         continue
     result = {
             'frame_head': parsed[0],
-            'dart_status': parsed[1],
+            'last_switch': parsed[1],
             'blackbox_data': parsed[2:14],  # 索引2到13
-            'frame_tail': parsed[14]
+            #暂时不进行crc'crc':parsed[14],
+            'frame_tail': parsed[15]
         }
+    
+    #状态机切换逻辑
     frame_head=result["frame_head"]
-    dart_status=result["dart_status"]
+    last_switch=result["last_switch"]
     frame_tail=result["frame_tail"]
-    if dart_status!=1:
+    #根据last_switch切换状态机
+    if last_switch!=1:
         state=0
         uart_send(state,0,0)
         continue
-    elif dart_status==3:
-
+    elif last_switch==3:
         break
 
     if (num==0):
