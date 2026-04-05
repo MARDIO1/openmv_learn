@@ -1,6 +1,9 @@
 import sensor, image, time,pyb,os
 from pyb import UART
 import ustruct,struct
+#调试开关
+DEBUG=True#False
+
 # 初始化SD卡
 sd = pyb.SDCard()
 
@@ -49,10 +52,11 @@ def uart_read():#uart 接收
     global uart,rx_buf,condition;
     while uart.any():
             byte = uart.readchar()
-
+            if DEBUG:print(f"[UART]接收到字节：0x{byte:02X}")
             # 等待帧头
             if condition == 0:
                 if byte == RX_HEAD:
+                    if DEBUG:print(f"[UART]找到帧头：0x{RX_HEAD:02X}")
                     rx_buf = bytearray([byte])
                     condition = 1
 
@@ -78,9 +82,12 @@ f = open(f"/sd/data/fps_{log_id}.txt", "w")
 while(True):
     receive=uart_read()
     if receive is None:
+        if DEBUG:print("[UART]未接收到数据")
         continue
     if len(receive)!=RX_LEN:
+        if DEBUG:print(f"[UART]数据长度错误：期望{RX_LEN},实际{len(receive)}")
         continue
+    if DEBUG:print(f"[UART]接收完整帧：{receive.hex()}")
     fmt='16B'
     try:
         parsed=struct.unpack(fmt,receive)
@@ -93,21 +100,27 @@ while(True):
             #暂时不进行crc'crc':parsed[14],
             'frame_tail': parsed[15]
         }
+    if DEBUG:print(f"[解析]last_switch={result['last_switch']},帧尾=0x{result['frame_tail']}")
     
     #状态机切换逻辑
     frame_head=result["frame_head"]
     last_switch=result["last_switch"]
     frame_tail=result["frame_tail"]
+    if DEBUG:print(f"[状态机]接收到last_switch={last_switch},当前state={state}")
     #根据last_switch切换状态机
     if last_switch!=1:
         state=0
+        if DEBUG:print(f"[状态机]切换到停止状态：state={state}")
         uart_send(state,0,0)
         continue
     elif last_switch==3:
+        if DEBUG:print("[状态机]接收到结束命令，退出程序")
         break
-
+        
+#摄像头初始化
     if (num==0):
         try:
+            if DEBUG:print("[摄像头]开始初始化...")
             sensor.reset() # 初始化摄像头
             sensor.set_pixformat(sensor.RGB565) # 格式为 RGB565.
             sensor.set_framesize(sensor.QVGA) # 使用 QQVGA 速度快一些
@@ -118,23 +131,30 @@ while(True):
         except OSError as e:
             print(f"初始化失败 (OSError): {e}")
             state=2
+            if DEBUG:print(f"[摄像头]初始化失败，state={state}")
             uart_send(state,0,0)
             continue
         else:
             num=1
             state=1
+            if DEBUG:print(f"[摄像头]初始化成功，state={state}")
             center_x=sensor.width()//2
             center_y=sensor.height()//2
 
     blackbox_data=result["blackbox_data"]
     clock.tick() # Track elapsed milliseconds between snapshots().
+   
     try:
         img = sensor.snapshot()
     except RuntimeError:
         state=2
+        if DEBUG:print("[错误]拍照失败")
         uart_send(state,0,0)
         continue
+    #图像识别
     blob =find_green_light(img)
+    if DEBUG:print(f"[识别]找到目标：{'是'if blob else'否'}")
+
     count=0
     a=0
     x_ral=0.0
@@ -158,6 +178,7 @@ while(True):
         #在目标颜色区域的中心画十字形标记
         x_ral=blob[5]-center_x # x_rel是x中心坐标（中心值）
         y_ral=blob[6]-center_y
+        if DEBUG:print(f"[识别]目标坐标：x={x_ral:.1f},y={y_ral:.1f}")
         count+=1
     else:
         lost_count+=1
@@ -173,6 +194,7 @@ while(True):
         img.save(save_path, quality=90)  # quality可选，默认90
         save_count += 1  # 保存计数器+1，避免覆盖
     uart_send(state,x_ral,y_ral)
+    if DEBUG:print(f"[发送]state={state},x={x_ral:.1f},y={y_ral:.1f}")
     #如果断开电脑，帧率会增加
     current_fps = clock.fps()
                # 格式：帧率 + 空格 + blackbox_data
