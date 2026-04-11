@@ -26,6 +26,8 @@ last_switch=0
 
 #识别参数
 green_threshold   = (   83, 100, -32, -18, -3, -20)
+#green_threshold = (90, 100, -10, 10, -10, 10)  # 白光阈值
+
 #调试开关
 DEBUG=True#False
 # 初始化SD卡
