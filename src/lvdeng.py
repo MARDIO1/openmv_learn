@@ -164,7 +164,7 @@ while True:
     if running:
         #识别绿色光源
         blob=find_green_light(img)
-        if DEBUG: print(f"[识别]找到目标：{'是'if blob else '否'}") 
+        #if DEBUG: print(f"[识别]找到目标：{'是'if blob else '否'}") 
         x_ral=0.0
         y_ral=0.0
 
@@ -183,9 +183,11 @@ while True:
             y_ral=blob[6]-CENTER_Y
             #计算角度
             yaw_rad, pitch_rad = pix_to_angle(blob[5], blob[6])
-            if DEBUG: print(f"[识别] 目标坐标: x={x_ral:.1f}, y={y_ral:.1f}")
-
-            #在图像上标记
+            if DEBUG: 
+                print(f"[识别] 目标坐标: x={x_ral:.1f}, y={y_ral:.1f}")
+                print(f"[识别] 角度(弧度): yaw={yaw_rad:.4f}, pitch={pitch_rad:.4f}")
+                print(f"[识别] 角度(度数): yaw={math.degrees(yaw_rad):.2f}°, pitch={math.degrees(pitch_rad):.2f}°")
+                #在图像上标记
             img.draw_rectangle(blob[0:4],color=255)
             img.draw_cross(blob[5],blob[6],color=255)
 
