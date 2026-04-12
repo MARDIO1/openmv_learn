@@ -1,6 +1,7 @@
-import sensor, image, time,pyb,os
+import sensor, image, time,pyb,os,math
 from pyb import UART
 import ustruct,struct
+
 #通信协议定义
 RX_HEAD=0xCC#接收
 RX_END=0xDD
@@ -8,9 +9,11 @@ RX_LEN=16
 TX_HEAD=0xEE#发送
 TX_END=0xFF
 
+#FOV标定参数 (根据摄像头规格和分辨率调整)
+FOV_X_DEG=68.0 #水平视场角
+FOV_Y_DEG=51.0 #垂直视场角
+
 #常量定义
-x_ral=0.0
-y_ral=0.0
 rx_buf = bytearray()
 condition = 0
 roi = None              # 当前ROI
@@ -18,7 +21,13 @@ lost_count = 0          # 丢失计数
 MAX_LOST = 4            # 丢失多少帧后恢复全图搜索
 frame_count=0           #帧率计数
 save_count=0            #照片计数
-clock = time.clock()    # 追踪帧率
+clock = time.clock()    # 追踪帧率  
+
+#变量定义
+yaw_rad = 0.0
+pitch_rad = 0.0
+x_ral=0.0
+y_ral=0.0
 
 #标志位定义
 running = False  
@@ -39,16 +48,19 @@ try:
     if DEBUG:print("[初始化]开始摄像头初始化...")
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)
+    sensor.set_framesize(sensor.QVGA)#修改分辨率
     sensor.skip_frames(time=2000)
+    IMAGE_W = sensor.width()#动态获取图像宽度，适应不同分辨率
+    IMAGE_H = sensor.height()
+    CENTER_X = IMAGE_W // 2
+    CENTER_Y = IMAGE_H // 2
     sensor.set_auto_gain(False)
     sensor.set_auto_whitebal(False)
     sensor.set_auto_exposure(False, exposure_us=500)
     if DEBUG: print("[初始化] 摄像头初始化成功")
 except Exception as e:
     print(f"[初始化]摄像头初始化失败：{e}")
-center_x=sensor.width()//2
-center_y=sensor.height()//2
+
 #uart初始化
 uart=UART(3,115200,timeout_char=200)
 
@@ -61,13 +73,22 @@ def find_green_light(img):#找绿色光源
         blobs=img.find_blobs([green_threshold],merge=True)
     return max(blobs, key=lambda b: b.area()) if blobs else None
 
-def uart_send(a,x,y):#uart 发送
+def pix_to_angle(x,y):#像素坐标转角度
+    dx = x - CENTER_X#以图像中心为原点，计算偏移
+    dy = y - CENTER_Y
+    yaw_deg=dx*(FOV_X_DEG/IMAGE_W)#根据水平视场角和图像宽度计算偏航角
+    pitch_deg=dy*(FOV_Y_DEG/IMAGE_H)#根据垂直视场角和图像高度计算俯仰角
+    yaw_rad=math.radians(yaw_deg)
+    pitch_rad=math.radians(pitch_deg)
+    return yaw_rad, pitch_rad
+
+def uart_send(a,yaw_rad,pitch_rad):#uart 发送
     global uart;
     date=ustruct.pack("<BBffB",
                  TX_HEAD,
                  int(a),
-                 float(x),
-                 float(y),
+                 float(yaw_rad),
+                 float(pitch_rad),
                  TX_END)
     uart.write(date)
 
@@ -152,19 +173,22 @@ while True:
             pad=20
             x=max(blob.x()-pad,0)
             y=max(blob.y()-pad,0)
-            w=min(blob.w()+pad*2,sensor.width()-x)
-            h=min(blob.h()+pad*2,sensor.height()-y)   
+            w=min(blob.w()+pad*2,IMAGE_W-x)
+            h=min(blob.h()+pad*2,IMAGE_H-y)   
             roi=(x,y,w,h)
             lost_count=0
 
             #计算坐标
-            x_ral=blob[5]-center_x
-            y_ral=blob[6]-center_y
+            x_ral=blob[5]-CENTER_X
+            y_ral=blob[6]-CENTER_Y
+            #计算角度
+            yaw_rad, pitch_rad = pix_to_angle(blob[5], blob[6])
             if DEBUG: print(f"[识别] 目标坐标: x={x_ral:.1f}, y={y_ral:.1f}")
 
             #在图像上标记
             img.draw_rectangle(blob[0:4],color=255)
             img.draw_cross(blob[5],blob[6],color=255)
+
         else:
             lost_count+=1
             if lost_count>MAX_LOST:
@@ -173,9 +197,11 @@ while True:
         img.draw_string(5,15,f"状态：{'运行'if running else '停止'}",color=255,scale=1.0)
         img.draw_string(5,25,f"x:{x_ral:.0f}",color=255,scale=1.0)
         img.draw_string(5,35,f"y:{y_ral:.0f}",color=255,scale=1.0)
-
+        # 在图像上显示角度信息
+        img.draw_string(10, 10, f"Y:{math.degrees(yaw_rad):+.1f}°", color=(255,255,255))
+        img.draw_string(10, 25, f"P:{math.degrees(pitch_rad):+.1f}°", color=(255,255,255))
         #发送识别结果
-        uart_send(1,x_ral,y_ral)
+        uart_send(1,yaw_rad,pitch_rad)
 
         #保存图片
         if frame_count%100==0 and save_count<1000:
