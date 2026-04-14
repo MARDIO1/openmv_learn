@@ -44,20 +44,28 @@ sd = pyb.SDCard()
 os.mount(sd, '/sd')
 
 #初始化摄像头
-try:
-    if DEBUG:print("[初始化]开始摄像头初始化...")
+try: 
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)#修改分辨率
+    sensor.set_framesize(sensor.QVGA)  # 修改分辨率
     sensor.skip_frames(time=2000)
-    IMAGE_W = sensor.width()#动态获取图像宽度，适应不同分辨率
+    IMAGE_W = sensor.width()  # 动态获取图像宽度，适应不同分辨率
     IMAGE_H = sensor.height()
     CENTER_X = IMAGE_W // 2
     CENTER_Y = IMAGE_H // 2
     sensor.set_auto_gain(False)
     sensor.set_auto_whitebal(False)
     sensor.set_auto_exposure(False, exposure_us=500)
-    if DEBUG: print("[初始化] 摄像头初始化成功")
+    if DEBUG:
+        print("[初始化] 摄像头初始化成功")
+        print(f"[参数] 图像分辨率: {IMAGE_W} × {IMAGE_H}")
+        print(f"[参数] 图像中心坐标: ({CENTER_X}, {CENTER_Y})")
+        print(f"[参数] x坐标范围: [-{CENTER_X}, {CENTER_X}]")
+        print(f"[参数] y坐标范围: [-{CENTER_Y}, {CENTER_Y}]")
+        print(f"[参数] 水平视场角(FOV_X): {FOV_X_DEG}°")
+        print(f"[参数] 垂直视场角(FOV_Y): {FOV_Y_DEG}°")
+        print(f"[参数] yaw角度范围: [-{FOV_X_DEG/2:.1f}°, {FOV_X_DEG/2:.1f}°]")
+        print(f"[参数] pitch角度范围: [-{FOV_Y_DEG/2:.1f}°, {FOV_Y_DEG/2:.1f}°]")
 except Exception as e:
     print(f"[初始化]摄像头初始化失败：{e}")
 
@@ -188,20 +196,20 @@ while True:
                 print(f"[识别] 角度(弧度): yaw={yaw_rad:.4f}, pitch={pitch_rad:.4f}")
                 print(f"[识别] 角度(度数): yaw={math.degrees(yaw_rad):.2f}°, pitch={math.degrees(pitch_rad):.2f}°")
                 #在图像上标记
-            img.draw_rectangle(blob[0:4],color=255)
-            img.draw_cross(blob[5],blob[6],color=255)
+            img.draw_rectangle(blob[0:4],color=(255,255,255))
+            img.draw_cross(blob[5],blob[6],color=(255,255,255))
 
         else:
             lost_count+=1
             if lost_count>MAX_LOST:
                 roi=None
         #显示信息
-        img.draw_string(5,15,f"状态：{'运行'if running else '停止'}",color=255,scale=1.0)
-        img.draw_string(5,25,f"x:{x_ral:.0f}",color=255,scale=1.0)
-        img.draw_string(5,35,f"y:{y_ral:.0f}",color=255,scale=1.0)
+        img.draw_string(5,20,f"状态：{'运行'if running else '停止'}",color=(255,255,255),scale=1.0)
+        img.draw_string(5,30,f"x:{x_ral:.0f}",color=(255,255,255),scale=1.0)
+        img.draw_string(5,40,f"y:{y_ral:.0f}",color=(255,255,255),scale=1.0)
         # 在图像上显示角度信息
-        img.draw_string(10, 10, f"Y:{math.degrees(yaw_rad):+.1f}°", color=(255,255,255))
-        img.draw_string(10, 25, f"P:{math.degrees(pitch_rad):+.1f}°", color=(255,255,255))
+        img.draw_string(80, 25, f"Y:{math.degrees(yaw_rad):+.1f}°", color=(255,255,255))
+        img.draw_string(80, 35, f"P:{math.degrees(pitch_rad):+.1f}°", color=(255,255,255))
         #发送识别结果
         uart_send(1,yaw_rad,pitch_rad)
 
