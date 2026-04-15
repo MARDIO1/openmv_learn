@@ -191,6 +191,8 @@ while True:
             y_ral=blob[6]-CENTER_Y
             #计算角度
             yaw_rad, pitch_rad = pix_to_angle(blob[5], blob[6])
+            #发送识别结果
+            uart_send(1,yaw_rad,pitch_rad)
             if DEBUG: 
                 print(f"[识别] 目标坐标: x={x_ral:.1f}, y={y_ral:.1f}")
                 print(f"[识别] 角度(弧度): yaw={yaw_rad:.4f}, pitch={pitch_rad:.4f}")
@@ -203,6 +205,7 @@ while True:
             lost_count+=1
             if lost_count>MAX_LOST:
                 roi=None
+            uart_send(0,0,0)
         #显示信息
         img.draw_string(5,20,f"状态：{'运行'if running else '停止'}",color=(255,255,255),scale=1.0)
         img.draw_string(5,30,f"x:{x_ral:.0f}",color=(255,255,255),scale=1.0)
@@ -210,8 +213,6 @@ while True:
         # 在图像上显示角度信息
         img.draw_string(80, 25, f"Y:{math.degrees(yaw_rad):+.1f}°", color=(255,255,255))
         img.draw_string(80, 35, f"P:{math.degrees(pitch_rad):+.1f}°", color=(255,255,255))
-        #发送识别结果
-        uart_send(1,yaw_rad,pitch_rad)
 
         #保存图片
         if frame_count%100==0 and save_count<1000:
