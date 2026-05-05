@@ -34,7 +34,7 @@ running = False
 last_switch=0
 
 #识别参数L:亮度值范围 A:绿-红色彩范围 B:蓝-黄色彩范围
-green_threshold   = (   83, 100, -32, -18, -3, -20)
+green_threshold   = (   92, 100, -87, 11, -20, 14)
 #green_threshold = (90, 100, -10, 10, -10, 10)  # 白光阈值
 
 #调试开关
