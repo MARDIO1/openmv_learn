@@ -1,236 +1,368 @@
-import sensor, image, time,pyb,os,math
+import sensor, image, time, math, mjpeg, os
 from pyb import UART
-import ustruct,struct
+import ustruct
 
-#通信协议定义
-RX_HEAD=0xCC#接收
-RX_END=0xDD
-RX_LEN=16
-TX_HEAD=0xEE#发送
-TX_END=0xFF
+# ==============================================
+# 通信协议定义
+# ==============================================
+TX_HEAD = 0xEE
+TX_END  = 0xFF
 
-#FOV标定参数 (根据摄像头规格和分辨率调整)
-FOV_X_DEG=68.0 #水平视场角
-FOV_Y_DEG=51.0 #垂直视场角
+# ==============================================
+# FOV 标定参数
+# ==============================================
+FOV_X_DEG = 68.0
+FOV_Y_DEG = 51.0
 
-#常量定义
-rx_buf = bytearray()
-condition = 0
-roi = None              # 当前ROI
-lost_count = 0          # 丢失计数
-MAX_LOST = 4            # 丢失多少帧后恢复全图搜索
-frame_count=0           #帧率计数
-save_count=0            #照片计数
-clock = time.clock()    # 追踪帧率  
+# ==============================================
+# 识别参数
+# ==============================================
+green_threshold = (80, 100, -100, 11, -20, 20)
+MAX_LOST = 4
 
-#变量定义
-yaw_rad = 0.0
-pitch_rad = 0.0
-x_ral=0.0
-y_ral=0.0
+# ==============================================
+# 内录参数
+# ==============================================
+REC_ENABLE = True
 
-#标志位定义
-running = False  
-last_switch=0
+# 建议 2~5fps
+REC_FPS = 35
+REC_INTERVAL_MS = int(1000 / REC_FPS)
 
-#识别参数L:亮度值范围 A:绿-红色彩范围 B:蓝-黄色彩范围
-green_threshold   = (   92, 100, -87, 11, -20, 14)
-#green_threshold = (90, 100, -10, 10, -10, 10)  # 白光阈值
+# 单次录制最长时间
+REC_DURATION_MS = 15000
 
-#调试开关
-DEBUG=True#False
-# 初始化SD卡
-sd = pyb.SDCard()
-os.mount(sd, '/sd')
+# 目标丢失超过多久停止录制
+LOST_STOP_MS = 2000
 
-#初始化摄像头
-try: 
-    sensor.reset()
-    sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)  # 修改分辨率
-    sensor.skip_frames(time=2000)
-    IMAGE_W = sensor.width()  # 动态获取图像宽度，适应不同分辨率
-    IMAGE_H = sensor.height()
-    CENTER_X = IMAGE_W // 2
-    CENTER_Y = IMAGE_H // 2
-    sensor.set_auto_gain(False)
-    sensor.set_auto_whitebal(False)
-    sensor.set_auto_exposure(False, exposure_us=500)
-    if DEBUG:
-        print("[初始化] 摄像头初始化成功")
-        print(f"[参数] 图像分辨率: {IMAGE_W} × {IMAGE_H}")
-        print(f"[参数] 图像中心坐标: ({CENTER_X}, {CENTER_Y})")
-        print(f"[参数] x坐标范围: [-{CENTER_X}, {CENTER_X}]")
-        print(f"[参数] y坐标范围: [-{CENTER_Y}, {CENTER_Y}]")
-        print(f"[参数] 水平视场角(FOV_X): {FOV_X_DEG}°")
-        print(f"[参数] 垂直视场角(FOV_Y): {FOV_Y_DEG}°")
-        print(f"[参数] yaw角度范围: [-{FOV_X_DEG/2:.1f}°, {FOV_X_DEG/2:.1f}°]")
-        print(f"[参数] pitch角度范围: [-{FOV_Y_DEG/2:.1f}°, {FOV_Y_DEG/2:.1f}°]")
-except Exception as e:
-    print(f"[初始化]摄像头初始化失败：{e}")
+# JPEG 质量
+REC_QUALITY = 20
 
-#uart初始化
-uart=UART(3,115200,timeout_char=200)
+# 自动文件名
+REC_PREFIX = "rec_"
+REC_EXT = ".mjpeg"
 
-#函数定义
-def find_green_light(img):#找绿色光源
-    global roi
+# ==============================================
+# 状态变量
+# ==============================================
+roi = None
+lost_count = 0
+
+last_yaw_rad   = 0.0
+last_pitch_rad = 0.0
+last_frame_time_us = 0
+
+# 录制相关
+recording = False
+stream = None
+frame_cnt = 0
+record_start_ms = 0
+last_record_ms = 0
+lost_since_ms = 0
+mjpeg_quality_supported = True
+current_record_name = ""
+
+# 0x02 是否已发
+sent_0x02 = False
+
+# ==============================================
+# 摄像头初始化
+# ==============================================
+sensor.reset()
+sensor.set_pixformat(sensor.RGB565)
+sensor.set_framesize(sensor.QVGA)
+
+sensor.set_auto_gain(False)
+sensor.set_auto_whitebal(False)
+sensor.set_auto_exposure(False, exposure_us=450)
+sensor.skip_frames(time=500)
+
+IMAGE_W  = sensor.width()
+IMAGE_H  = sensor.height()
+CENTER_X = IMAGE_W // 2
+CENTER_Y = IMAGE_H // 2
+
+# ==============================================
+# UART 初始化
+# ==============================================
+uart = UART(3, 115200, timeout_char=200)
+
+# ==============================================
+# 函数定义
+# ==============================================
+def find_green_light(img):
+    global roi, lost_count
+
+    blobs = []
+
+    # 核心修复：先ROI搜索，找不到自动全局搜索
     if roi:
-        blobs = img.find_blobs([green_threshold],roi=roi, merge=True)
+        # 第一步：优先在ROI内搜索（速度快）
+        blobs = img.find_blobs([green_threshold], roi=roi, merge=False, pixels_threshold=10, area_threshold=10)
+
+        # 第二步：ROI内没找到，立即全局搜索
+        if not blobs:
+            blobs = img.find_blobs([green_threshold], merge=False, pixels_threshold=10, area_threshold=10)
     else:
-        blobs=img.find_blobs([green_threshold],merge=True)
+        # 没有ROI时直接全局搜索
+        blobs = img.find_blobs([green_threshold], merge=False, pixels_threshold=10, area_threshold=10)
+
     return max(blobs, key=lambda b: b.area()) if blobs else None
 
-def pix_to_angle(x,y):#像素坐标转角度
-    dx = x - CENTER_X#以图像中心为原点，计算偏移
+def pix_to_angle(x, y):
+    dx = x - CENTER_X
     dy = y - CENTER_Y
-    yaw_deg=dx*(FOV_X_DEG/IMAGE_W)#根据水平视场角和图像宽度计算偏航角
-    pitch_deg=dy*(FOV_Y_DEG/IMAGE_H)#根据垂直视场角和图像高度计算俯仰角
-    yaw_rad=math.radians(yaw_deg)
-    pitch_rad=math.radians(pitch_deg)
-    return yaw_rad, pitch_rad
 
-def uart_send(a,yaw_rad,pitch_rad):#uart 发送
-    global uart;
-    date=ustruct.pack("<BBffB",
-                 TX_HEAD,
-                 int(a),
-                 float(yaw_rad),
-                 float(pitch_rad),
-                 TX_END)
-    uart.write(date)
+    yaw_deg   = dx * (FOV_X_DEG / IMAGE_W)
+    pitch_deg = dy * (FOV_Y_DEG / IMAGE_H)
 
-def uart_read():#uart 接收
-    global uart,rx_buf,condition;
-    while uart.any():
-            byte = uart.readchar()
-            if DEBUG:print(f"[UART]接收到字节：0x{byte:02X}")
-            # 等待帧头
-            if condition == 0:
-                if byte == RX_HEAD:
-                    if DEBUG:print(f"[UART]找到帧头：0x{RX_HEAD:02X}")
-                    rx_buf = bytearray([byte])
-                    condition = 1
+    return math.radians(yaw_deg), math.radians(pitch_deg)
 
-            # 正在接收一帧
-            elif condition == 1:
-                rx_buf.append(byte)
 
-                if len(rx_buf) == RX_LEN:
-                    condition = 0
+def uart_send(switch, yaw_radps, pitch_radps):
+    data = ustruct.pack(
+        "<BBffB",
+        TX_HEAD,
+        int(switch),
+        float(yaw_radps),
+        float(pitch_radps),
+        TX_END
+    )
+    uart.write(data)
 
-                    if rx_buf[-1] == RX_END:
-                        return rx_buf  # 成功接收一帧
-                    else:
-                        rx_buf = bytearray()  # 帧错误，丢弃
-                        return None
-    return None
 
-#主程序入口
-#创建日志文件
-log_id = 0
-while f"fps_{log_id}.txt" in os.listdir("/sd/data"):
-    log_id += 1
-f = open(f"/sd/data/fps_{log_id}.txt", "w")
+def get_next_mjpeg_name():
+    idx = 0
 
-if DEBUG: print("[系统] 开始主循环...")
+    while True:
+        name = "%s%03d%s" % (REC_PREFIX, idx, REC_EXT)
+
+        try:
+            os.stat(name)
+            idx += 1
+        except OSError:
+            return name
+
+
+def start_record():
+    global recording, stream, frame_cnt
+    global record_start_ms, last_record_ms
+    global current_record_name
+
+    if not REC_ENABLE:
+        return False
+
+    if recording:
+        return True
+
+    try:
+        file_name = get_next_mjpeg_name()
+
+        stream = mjpeg.Mjpeg(file_name)
+        current_record_name = file_name
+
+        recording = True
+        frame_cnt = 0
+
+        now_ms = time.ticks_ms()
+        record_start_ms = now_ms
+        # 只有识别到绿灯后，在 blob 分支里按 REC_FPS 写入
+        last_record_ms = now_ms
+
+        print("Record start:", current_record_name)
+
+        return True
+
+    except Exception as e:
+        print("Record start error:", e)
+        stream = None
+        recording = False
+        current_record_name = ""
+        return False
+
+
+def stop_record():
+    global recording, stream
+    global current_record_name
+
+    if not recording:
+        return
+
+    try:
+        if stream:
+            stream.close()
+    except Exception as e:
+        print("Record close error:", e)
+
+    print("Record stop:", current_record_name)
+
+    stream = None
+    recording = False
+    current_record_name = ""
+
+
+def mjpeg_add_frame_safe(img):
+    global stream, mjpeg_quality_supported
+
+    if not recording or stream is None:
+        return False
+
+    try:
+        if mjpeg_quality_supported:
+            try:
+                stream.add_frame(img, quality=REC_QUALITY)
+            except TypeError:
+                mjpeg_quality_supported = False
+                stream.add_frame(img)
+        else:
+            stream.add_frame(img)
+
+        return True
+
+    except Exception as e:
+        print("Add frame error:", e)
+        stop_record()
+        return False
+
+
+def record_frame_if_needed(img):
+    global last_record_ms, frame_cnt
+
+    if not recording:
+        return
+
+    now_ms = time.ticks_ms()
+
+    if time.ticks_diff(now_ms, last_record_ms) >= REC_INTERVAL_MS:
+        if mjpeg_add_frame_safe(img):
+            frame_cnt += 1
+
+        last_record_ms = now_ms
+
+
+def update_roi(blob):
+    global roi
+
+    pad = 20
+
+    x = max(blob.x() - pad, 0)
+    y = max(blob.y() - pad, 0)
+    w = min(blob.w() + pad * 2, IMAGE_W - x)
+    h = min(blob.h() + pad * 2, IMAGE_H - y)
+
+    roi = (x, y, w, h)
+
+
+def check_record_timeout():
+    global sent_0x02
+
+    if not recording:
+        return
+
+    now_ms = time.ticks_ms()
+
+    if time.ticks_diff(now_ms, record_start_ms) >= REC_DURATION_MS:
+        stop_record()
+        sent_0x02 = False
+
+
+def check_lost_timeout():
+    global sent_0x02
+
+    if not recording:
+        return
+
+    if lost_since_ms == 0:
+        return
+
+    now_ms = time.ticks_ms()
+
+    if time.ticks_diff(now_ms, lost_since_ms) >= LOST_STOP_MS:
+        stop_record()
+        sent_0x02 = False
+
+
+# ==============================================
+# 主循环
+# ==============================================
+clock = time.clock()
 
 while True:
-    #1.检查UART数据
-    receive=uart_read()
-    if receive is not None and len(receive)==RX_LEN:
-        try:
-            parsed=struct.unpack('16B',receive)
-            #验证帧头和帧尾
-            if parsed[0]==RX_HEAD and parsed[15]==RX_END:
-                last_switch=parsed[1]
-                if DEBUG:print(f"[解析]last_switch={last_switch}")
-                #根据last_switch更新状态
-                if last_switch==1:#开始识别
-                    if not running:
-                        running=True
-                        if DEBUG: print("[状态] 切换到运行状态")
-                elif  last_switch==0:#不识别
-                        if running:
-                            running=False
-                            if DEBUG:print("[状态]切换到停止状态")
-                elif last_switch==2:#退出程序
-                        if DEBUG:print("[状态]接收到结束命令")
-                        break
-        except struct.error:
-            if DEBUG:print("[错误]失败")
-            uart_send(2,0,0)
-            continue
-    #2.持续拍照
+    clock.tick()
+
+    # 1. 拍照
     try:
-        img=sensor.snapshot()
+        img = sensor.snapshot()
     except RuntimeError:
-        if DEBUG:print("[错误]拍照失败")
-        uart_send(2,0,0)
+        uart_send(0, 0.0, 0.0)
         continue
-    #3.只有在运行状态进行识别处理
-    if running:
-        #识别绿色光源
-        blob=find_green_light(img)
-        #if DEBUG: print(f"[识别]找到目标：{'是'if blob else '否'}") 
-        x_ral=0.0
-        y_ral=0.0
 
-        if blob:
-            #更新ROI
-            pad=20
-            x=max(blob.x()-pad,0)
-            y=max(blob.y()-pad,0)
-            w=min(blob.w()+pad*2,IMAGE_W-x)
-            h=min(blob.h()+pad*2,IMAGE_H-y)   
-            roi=(x,y,w,h)
-            lost_count=0
+    now_us = time.ticks_us()
+    now_ms = time.ticks_ms()
 
-            #计算坐标
-            x_ral=blob[5]-CENTER_X
-            y_ral=blob[6]-CENTER_Y
-            #计算角度
-            yaw_rad, pitch_rad = pix_to_angle(blob[5], blob[6])
-            #发送识别结果
-            uart_send(1,yaw_rad,pitch_rad)
-            if DEBUG: 
-                print(f"[识别] 目标坐标: x={x_ral:.1f}, y={y_ral:.1f}")
-                print(f"[识别] 角度(弧度): yaw={yaw_rad:.4f}, pitch={pitch_rad:.4f}")
-                print(f"[识别] 角度(度数): yaw={math.degrees(yaw_rad):.2f}°, pitch={math.degrees(pitch_rad):.2f}°")
-                #在图像上标记
-            img.draw_rectangle(blob[0:4],color=(255,255,255))
-            img.draw_cross(blob[5],blob[6],color=(255,255,255))
+    # 2. 识别绿灯
+    blob = find_green_light(img)
+
+    if blob:
+        lost_count = 0
+        lost_since_ms = 0
+
+        update_roi(blob)
+
+        yaw_rad, pitch_rad = pix_to_angle(blob.cx(), blob.cy())
+
+        yaw_body_radps = 0.0
+        pitch_body_radps = 0.0
+
+        if last_frame_time_us > 0:
+            dt_s = time.ticks_diff(now_us, last_frame_time_us) / 1000000.0
+
+            if 0.001 < dt_s < 1.0:
+                yaw_body_radps   = (yaw_rad   - last_yaw_rad)   / dt_s
+                pitch_body_radps = (pitch_rad - last_pitch_rad) / dt_s
+
+        last_yaw_rad = yaw_rad
+        last_pitch_rad = pitch_rad
+        last_frame_time_us = now_us
+
+        # ======================================
+        # 发现绿灯后才启动录像、写入录像
+        # ======================================
+        if not recording:
+            if not sent_0x02:
+                uart_send(2, yaw_body_radps, pitch_body_radps)
+                sent_0x02 = True
+
+            start_record()
 
         else:
-            lost_count+=1
-            if lost_count>MAX_LOST:
-                roi=None
-            uart_send(0,0,0)
-        #显示信息
-        img.draw_string(5,20,f"状态：{'运行'if running else '停止'}",color=(255,255,255),scale=1.0)
-        img.draw_string(5,30,f"x:{x_ral:.0f}",color=(255,255,255),scale=1.0)
-        img.draw_string(5,40,f"y:{y_ral:.0f}",color=(255,255,255),scale=1.0)
-        # 在图像上显示角度信息
-        img.draw_string(80, 25, f"Y:{math.degrees(yaw_rad):+.1f}°", color=(255,255,255))
-        img.draw_string(80, 35, f"P:{math.degrees(pitch_rad):+.1f}°", color=(255,255,255))
+            uart_send(1, yaw_body_radps, pitch_body_radps)
 
-        #保存图片
-        if frame_count%100==0 and save_count<1000:
-            save_path=f"/sd/data/picture/frame_{save_count}.jpg"
-            img.save(save_path,quality=90)
-            save_count+=1 
-    else:#非运行状态
-       pass
-    #4.记录帧率
-    current_fps=clock.fps()
-    f.write(f"{current_fps:.2f}\n")
-    frame_count+=1
+        # 重点：
+        # 只有在 blob 存在，也就是确实识别到绿灯时，才写入视频帧
+        record_frame_if_needed(img)
 
-    #每100帧刷新文件缓冲区
-    if frame_count%100==0:
-        f.flush()
-        os.sync()
-#清理工作
-f.close()
-os.umount('/sd')
-if DEBUG: print("[系统] 程序结束")
+        check_record_timeout()
+
+        # ======================================
+        # IDE 显示
+        # ======================================
+        # ======================================
+        # IDE 显示
+        # ======================================
+        img.draw_rectangle(blob.rect(), color=(255, 0, 0))
+        img.draw_cross(blob.cx(), blob.cy(), color=(255, 0, 0))
+
+        img.draw_string(
+            blob.x() + 2,
+            max(blob.y() - 10, 0),
+            "yaw:" + str(round(math.degrees(yaw_rad), 1)) + "d",
+            color=(255, 0, 0)
+        )
+
+        img.draw_string(
+            0,
+            0,
+            ("REC " if recording else "") + "FPS:" + str(round(clock.fps(), 1)),
+            color=(255, 0, 0) if recording else (0, 255, 255)
+        )
